@@ -1,4 +1,4 @@
-module labour::Server
+module pokemondsl::Server
 
 import IO;
 import Set;
@@ -9,7 +9,7 @@ import ParseTree;
 import util::IDEServices;
 import util::LanguageServer;
 
-import labour::Syntax;
+import pokemondsl::Syntax;
 
 /*
  * A minimal implementation of a DSL in rascal
@@ -19,5 +19,5 @@ import labour::Syntax;
  * - https://www.rascal-mpl.org/docs/Packages/RascalLsp/API/demo/lang/pico/LanguageServer/#demo-lang-pico-LanguageServer-picoExecutionService
  */
 set[LanguageService] contributions() = {
-  parsing(parser(#start[BoulderingWall]), usesSpecialCaseHighlighting = false)
+  parsing(parser(#start[<PLACEHOLDER>]), usesSpecialCaseHighlighting = false)
 };

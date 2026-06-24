@@ -1,7 +1,7 @@
-module labour::AST
+module pokemondsl::AST
 
 /*
- * Define the Abstract Syntax for LaBouR
+ * Define the Abstract Syntax for 
  * - Hint: make sure there is an almost one-to-one correspondence with the grammar in Syntax.rsc
  */
 

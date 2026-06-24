@@ -1,0 +1,7 @@
+Manifest-Version: 1.0
+Project-Name: pokemondsl
+Source: src
+Language: pokemondsl::Plugin
+Language-Name: PokeBall
+Language-Extensions: pokeball
+Require-Libraries: |lib://rascal-lsp/|

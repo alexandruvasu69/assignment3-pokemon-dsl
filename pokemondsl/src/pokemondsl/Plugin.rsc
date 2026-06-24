@@ -1,4 +1,4 @@
-module labour::Plugin
+module pokemondsl::Plugin
 
 import IO;
 
@@ -6,10 +6,10 @@ import util::Reflective;
 import util::IDEServices;
 import util::LanguageServer;
 
-import labour::Server;
-import labour::Parser;
-import labour::CST2AST;
-import labour::Check;
+import pokemondsl::Server;
+import pokemondsl::Parser;
+import pokemondsl::CST2AST;
+import pokemondsl::Check;
 
 /*
  * This function is defined to test the functionality of the whole assignment. It receives a file path as a parameter and returns true if the program satisfies the specification or false otherwise.
@@ -18,7 +18,7 @@ import labour::Check;
  */
 bool checkWellformedness(loc fil) {
   // Parsing
-  &T resource = parseLaBouR(fil);
+  &T resource = parsePokemon(fil);
   // Transform the parse tree into an abstract syntax tree
   &T ast = cst2ast(resource);
   // Check the well-formedness of the program

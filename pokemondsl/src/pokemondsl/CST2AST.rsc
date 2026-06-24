@@ -1,4 +1,4 @@
-module labour::CST2AST
+module pokemondsl::CST2AST
 
 // This provides println which can be handy during debugging.
 import IO;
@@ -7,8 +7,8 @@ import IO;
 import Prelude;
 import String;
 
-import labour::AST;
-import labour::Syntax;
+import pokemondsl::AST;
+import pokemondsl::Syntax;
 
 /*
  * Implement a mapping from concrete syntax trees (CSTs) to abstract syntax trees (ASTs)
