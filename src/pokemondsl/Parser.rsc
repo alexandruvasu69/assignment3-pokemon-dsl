@@ -10,6 +10,6 @@ import pokemondsl::Syntax;
  * that represents the parsed program.
  */
 
- start[BoulderingWall] parsePokemon(loc filePath) {
-    return parse(#start[<PLACEHOLDER>], readFile(filePath));
+start[Program] parsePokemon(loc filePath) {
+    return parse(#start[Program], readFile(filePath), filePath);
 }
