@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""
+pokescript — the PokéScript agent CLI.
+
+The headless bridge that lets an LLM play Pokémon by writing PokéScript:
+
+    pokescript observe            # game state, in PokéScript's own vocabulary
+    pokescript check  FILE.pks    # static-check a plan (the guardrail)
+    pokescript run    FILE.pks    # check -> compile -> run against the live game
+
+`check`/`run` drive the Rascal compiler headlessly; `observe`/`run` talk to the
+pokemon-agent backend (default http://localhost:8765, override with POKESCRIPT_URL).
+"""
+import os
+import re
+import sys
+import pty
+import time
+import select
+import subprocess
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC = os.path.join(REPO, "src")
+RUNTIME = os.path.join(REPO, "runtime")
+RASCAL_JAR = os.path.expanduser(
+    "~/.m2/repository/org/rascalmpl/rascal/0.40.17/rascal-0.40.17.jar")
+GEN_PY = os.path.join(RUNTIME, "_agent_player.py")
+
+
+# --------------------------------------------------------------------------
+# Rascal shell driver (paced pty — the shell drops fast/buffered input)
+# --------------------------------------------------------------------------
+def _rascal(commands):
+    """Run a list of rascal-shell command lines; return everything printed
+    between PSCLI_BEGIN and PSCLI_END markers."""
+    cp = RASCAL_JAR + ":" + SRC
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.environ["TERM"] = "dumb"
+        os.execvp("java", ["java", "-Xss16m", "-Xmx2g", "-cp", cp,
+                           "org.rascalmpl.shell.RascalShell"])
+    buf = b""
+
+    def drain(seconds):
+        nonlocal buf
+        end = time.time() + seconds
+        while time.time() < end:
+            r, _, _ = select.select([fd], [], [], 0.3)
+            if r:
+                try:
+                    d = os.read(fd, 65536)
+                except OSError:
+                    return
+                if d:
+                    buf += d
+
+    def prompt_ready():
+        return buf.rstrip().endswith(b"rascal>")
+
+    # wait for the first prompt
+    for _ in range(120):
+        drain(0.5)
+        if prompt_ready():
+            break
+    for line in commands:
+        os.write(fd, (line + "\n").encode())
+        # wait until the prompt returns (module loads can take a while)
+        for _ in range(120):
+            drain(1.0)
+            if prompt_ready() or b"PSCLI_END" in buf:
+                break
+        if b"PSCLI_END" in buf:
+            break
+    drain(1.0)
+    try:
+        os.write(fd, b":quit\n")
+    except OSError:
+        pass
+    txt = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", buf.decode(errors="replace"))
+    m = re.search(r"PSCLI_BEGIN\s*\n(.*?)\nPSCLI_END", txt, re.S)
+    return (m.group(1).strip() if m else txt).strip()
+
+
+def _loc(path):
+    return "|file://" + os.path.abspath(path) + "|"
+
+
+def _clean(out):
+    """Keep only checker result lines (OK / COMPILED / diagnostics)."""
+    keep = [l.strip() for l in out.splitlines()
+            if re.match(r"^(OK|COMPILED|error \[|warning \[)", l.strip())]
+    return "\n".join(keep) if keep else out.strip()
+
+
+def rascal_check(path):
+    return _clean(_rascal([
+        "import IO;",
+        "import pokemondsl::Cli;",
+        'println("PSCLI_BEGIN");',
+        "println(checkStr(%s));" % _loc(path),
+        'println("PSCLI_END");',
+    ]))
+
+
+def rascal_check_and_compile(path, out_py):
+    return _clean(_rascal([
+        "import IO;",
+        "import pokemondsl::Cli;",
+        'println("PSCLI_BEGIN");',
+        "println(checkAndCompile(%s, %s));" % (_loc(path), _loc(out_py)),
+        'println("PSCLI_END");',
+    ]))
+
+
+# --------------------------------------------------------------------------
+# observe — game state rendered in PokéScript's sensor vocabulary
+# --------------------------------------------------------------------------
+def observe():
+    sys.path.insert(0, RUNTIME)
+    import pokescript_rt as rt
+    try:
+        s = rt.state()
+    except Exception as e:
+        return "error: backend unreachable (%s). Is `pokemon-agent serve` running?" % e
+    party = s.get("party", []) or []
+    lead = party[0] if party else {}
+    b = s.get("battle", {}) or {}
+    lines = [
+        "// OBSERVATION (PokéScript sensors)",
+        "location        = Location::%s" % rt.current_location(),
+        "money           = %d" % rt.money(),
+        "badges          = %s" % (", ".join(s.get("player", {}).get("badges", []) or []) or "(none)"),
+        "party.count     = %d" % len(party),
+        "party.avg_level = %d" % rt.average_level(),
+        "party.lead      = %s L%s  hp %s%%" % (
+            lead.get("species", "-"), lead.get("level", "-"), rt.lead_hp_percent()),
+        "party.is_full   = %s" % ("true" if rt.is_full() else "false"),
+        "in_battle       = %s%s" % (
+            "true" if b.get("in_battle") else "false",
+            ("  (enemy %s L%s)" % (b.get("enemy", {}).get("species"),
+                                   b.get("enemy", {}).get("level"))) if b.get("in_battle") else ""),
+    ]
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+def cmd_run(path):
+    report = rascal_check_and_compile(path, GEN_PY)
+    print(report)
+    if "COMPILED" not in report:
+        print("\n[pokescript] not run: static check failed. Fix the plan and retry.")
+        return 1
+    print("\n[pokescript] running generated player against the live game...\n")
+    return subprocess.call([sys.executable, GEN_PY], cwd=RUNTIME)
+
+
+def main(argv):
+    if len(argv) < 2:
+        print(__doc__)
+        return 2
+    cmd = argv[1]
+    if cmd == "observe":
+        print(observe()); return 0
+    if cmd == "check":
+        print(rascal_check(argv[2])); return 0
+    if cmd == "run":
+        return cmd_run(argv[2])
+    print("unknown command: %s" % cmd)
+    print(__doc__)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
