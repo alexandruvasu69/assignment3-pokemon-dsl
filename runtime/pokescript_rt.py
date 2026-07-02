@@ -19,6 +19,12 @@ import json
 import os
 import time
 import urllib.request
+from collections import deque
+
+try:
+    import world as _world  # runtime/world.py — navigation world model
+except Exception:
+    _world = None
 
 BASE = os.environ.get("POKESCRIPT_URL", "http://localhost:8765")
 
@@ -280,20 +286,189 @@ def pc_withdraw(species: str):
     _stub(f"pc_withdraw {species} (PC box)")
 
 
-# ---- pure navigation: TODO stubs -----------------------------------------
+# ==========================================================================
+# Navigation engine (see world.py). Stitches the local 9x10 collision window
+# into a per-map map, A*/BFS to authored warp/waypoint tiles, and steps across
+# warps (discrete tiles, may read non-walkable -> force-step) and connections
+# (walk off a map edge). Cross-map routing is BFS over the WORLD graph.
+# ==========================================================================
+_DIRS = {"walk_up": (0, -1), "walk_down": (0, 1), "walk_left": (-1, 0), "walk_right": (1, 0)}
+_EDGE_DIR = {"north": "walk_up", "south": "walk_down", "east": "walk_right", "west": "walk_left"}
+_STITCH: dict = {}  # map_name -> {(x,y): walkable_bool}
+
+
+def _pos():
+    p = (state().get("player", {}) or {}).get("position", {}) or {}
+    return int(p.get("x", 0)), int(p.get("y", 0))
+
+
+def _mapname() -> str:
+    return (state().get("map", {}) or {}).get("map_name", "")
+
+
+def _collision():
+    return state().get("collision", {}) or {}
+
+
+def _stitch():
+    """Merge the current 9x10 window into the per-map stitched collision map."""
+    w = _collision().get("walkable")
+    if not w:
+        return
+    x, y = _pos()
+    d = _STITCH.setdefault(_mapname(), {})
+    for r in range(len(w)):
+        for c in range(len(w[r])):
+            d[(x + (c - 4), y + (r - 4))] = bool(w[r][c])
+
+
+def _bfs(known, start, goal):
+    """Shortest walk_* path over known-walkable cells; None if unreachable."""
+    prev = {start: None}
+    q = deque([start])
+    while q:
+        cur = q.popleft()
+        if cur == goal:
+            path = []
+            c = cur
+            while prev[c] is not None:
+                pc, a = prev[c]
+                path.append(a)
+                c = pc
+            return path[::-1]
+        for a, (dx, dy) in _DIRS.items():
+            nb = (cur[0] + dx, cur[1] + dy)
+            if known.get(nb) and nb not in prev:
+                prev[nb] = (cur, a)
+                q.append(nb)
+    return None
+
+
+def _greedy_step(x, y, tx, ty, known):
+    opts = []
+    if tx > x: opts.append("walk_right")
+    if tx < x: opts.append("walk_left")
+    if ty > y: opts.append("walk_down")
+    if ty < y: opts.append("walk_up")
+    for a in opts:
+        dx, dy = _DIRS[a]
+        if known.get((x + dx, y + dy), True):  # unknown -> worth trying
+            return a
+    return opts[0] if opts else "walk_up"
+
+
+def _walk_to(tx, ty, force_last=False, max_steps=300) -> bool:
+    """Walk to (tx,ty) on the current map. force_last steps onto a target tile that
+    reads non-walkable (a warp) by pathing to a walkable neighbour then forcing it."""
+    for _ in range(max_steps):
+        _stitch()
+        x, y = _pos()
+        if (x, y) == (tx, ty):
+            return True
+        known = _STITCH.get(_mapname(), {})
+        path = _bfs(known, (x, y), (tx, ty))
+        if path:
+            act([path[0]])
+            continue
+        if force_last:
+            # reach a known-walkable neighbour of the target, then force the last step
+            for a, (dx, dy) in _DIRS.items():
+                nb = (tx - dx, ty - dy)
+                if known.get(nb):
+                    p2 = _bfs(known, (x, y), nb)
+                    if p2 is not None:
+                        for st in p2:
+                            act([st])
+                        act([a])
+                        return True
+        act([_greedy_step(x, y, tx, ty, known)])
+    return False
+
+
+def _route(src, dst):
+    """BFS over the WORLD graph (edges = warps + connections) -> list of hops."""
+    if _world is None:
+        return None
+    prev = {src: None}
+    q = deque([src])
+    while q:
+        cur = q.popleft()
+        if cur == dst:
+            hops = []
+            c = cur
+            while prev[c] is not None:
+                pc, info = prev[c]
+                hops.append(info)
+                c = pc
+            return hops[::-1]
+        node = _world.WORLD.get(cur, {})
+        edges = [(dm, ("warp", (wx, wy))) for (wx, wy, dm) in node.get("warps", [])]
+        edges += [(dm, ("conn", e)) for e, dm in node.get("connections", {}).items()]
+        for dm, info in edges:
+            if dm not in prev:
+                prev[dm] = (cur, info)
+                q.append(dm)
+    return None
+
+
+def _cross(before, kind, arg):
+    """Execute one hop; wait for the map to change."""
+    if kind == "warp":
+        _walk_to(arg[0], arg[1], force_last=True)
+    else:  # connection edge
+        node = _world.WORLD.get(before, {})
+        gap = node.get("waypoints", {}).get(arg + "_exit")
+        if gap:
+            _walk_to(gap[0], gap[1])
+        for _ in range(4):
+            if _mapname() != before:
+                break
+            act([_EDGE_DIR[arg]])
+    for _ in range(6):  # let the new map load
+        if _mapname() != before:
+            break
+        act(["wait_20"])
+
+
 def navigate(location: str):
     narrate(f"navigate({location})")
-    _todo(f"navigate to {location}")
+    if _world is None:
+        _todo(f"navigate {location}: world model unavailable")
+        return
+    tgt = _world.LOCATION_MAP.get(location)
+    if not tgt:
+        _todo(f"navigate: no world-model entry for {location}")
+        return
+    target_map, waypoint = tgt
+    hops = _route(_mapname(), target_map)
+    if hops is None:
+        _todo(f"navigate: no route from {_mapname()} to {target_map}")
+        return
+    for kind, arg in hops:
+        _cross(_mapname(), kind, arg)
+    if waypoint:
+        wxy = _world.WORLD.get(target_map, {}).get("waypoints", {}).get(waypoint)
+        if wxy:
+            _walk_to(wxy[0], wxy[1])
+    narrate(f"navigate: arrived at {_mapname()}")
+
+
+def roam_grass():
+    """Wander in tall grass until a wild encounter starts."""
+    narrate("roam_grass()")
+    for _ in range(40):
+        if _in_battle():
+            return
+        act(["walk_up"])
+        if _in_battle():
+            return
+        act(["walk_down"])
+    narrate("roam_grass: no encounter (cap reached)")
 
 
 def push(entity: str, direction: str):
     narrate(f"push({entity}, {direction})")
     _todo(f"push {entity} {direction}")
-
-
-def roam_grass():
-    narrate("roam_grass()")
-    _todo("roam_grass: wander in grass to trigger encounters")
 
 
 def use_field_move(move: str):
