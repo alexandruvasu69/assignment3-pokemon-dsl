@@ -77,8 +77,8 @@
           <srcIgnores>
             <ignore>${project.basedir}/src/examples</ignore>
           </srcIgnores>
-          <enableStandardLibrary>false</enableStandardLibrary>
-          <mainModule>labour::Plugin</mainModule>
+          <enableStandardLibrary>true</enableStandardLibrary>
+          <mainModule>pokemondsl::Plugin</mainModule>
         </configuration>
         <executions>
             <execution>
